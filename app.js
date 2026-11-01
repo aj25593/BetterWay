@@ -1,86 +1,387 @@
-const $=id=>document.getElementById(id);
-const KEY="hamburg-route-stops-v2";
-let stops=JSON.parse(localStorage.getItem(KEY)||"[]"), start=null, markers=[], routeLayer=null, map;
-const MAX=20;
-map=L.map("map").setView([53.5511,9.9937],11);
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
-function save(){localStorage.setItem(KEY,JSON.stringify(stops))}
-function msg(t){$("status").textContent=t}
-function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
-async function geocode(q){
- const u="https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=de&q="+encodeURIComponent(q);
- const r=await fetch(u,{headers:{"Accept-Language":"de"}});
- if(!r.ok) throw Error("Adresssuche gerade nicht erreichbar.");
- const d=await r.json(); if(!d.length) throw Error("Adresse nicht gefunden. Bitte genauer eingeben.");
- return {lat:+d[0].lat,lon:+d[0].lon,label:d[0].display_name};
-}
-async function add(){
- const q=$("address").value.trim(); if(!q)return;
- if(stops.length>=MAX){msg("Maximal 20 Ziele.");return}
- $("add").disabled=true;msg("Suche Adresse …");
- try{const p=await geocode(q);stops.push({query:q,lat:p.lat,lon:p.lon,label:p.label});$("address").value="";save();render();msg("Ziel hinzugefügt.");}
- catch(e){msg(e.message)} finally{$("add").disabled=false}
-}
-$("add").onclick=add;$("address").addEventListener("keydown",e=>{if(e.key==="Enter")add()});
-function render(){
- $("count").textContent=stops.length+"/"+MAX;
- $("stops").innerHTML=stops.map((s,i)=>`<li class="stop"><span class="num">${i+1}</span><div class="stoptext"><div class="stopname">${esc(s.query)}</div><div class="stopmeta">${esc(s.label||"")}</div></div><div class="move"><button data-up="${i}" ${i===0?"disabled":""}>↑</button><button data-down="${i}" ${i===stops.length-1?"disabled":""}>↓</button></div><button class="danger remove" data-del="${i}" aria-label="Löschen">×</button></li>`).join("");
- $("stops").querySelectorAll("[data-up]").forEach(b=>b.onclick=()=>move(+b.dataset.up,-1));
- $("stops").querySelectorAll("[data-down]").forEach(b=>b.onclick=()=>move(+b.dataset.down,1));
- $("stops").querySelectorAll("[data-del]").forEach(b=>b.onclick=()=>{stops.splice(+b.dataset.del,1);save();render();});
- $("allMaps").disabled=!stops.length;$("next").disabled=!stops.length;
- drawMap(); $("distance").textContent="–";$("duration").textContent="–";
- if(stops.length>=2) calculateRoute();
-}
-function move(i,d){const j=i+d;if(j<0||j>=stops.length)return;[stops[i],stops[j]]=[stops[j],stops[i]];save();render()}
-function drawMap(){
- markers.forEach(m=>map.removeLayer(m));markers=[];if(routeLayer){map.removeLayer(routeLayer);routeLayer=null}
- const pts=[];
- stops.forEach((s,i)=>{const m=L.marker([s.lat,s.lon],{icon:L.divIcon({className:"",html:`<div style="background:#087cff;color:white;border:2px solid white;border-radius:50%;width:29px;height:29px;display:grid;place-items:center;font-weight:800;box-shadow:0 1px 5px #3338">${i+1}</div>`,iconSize:[29,29],iconAnchor:[14,14]})}).addTo(map).bindPopup(`<b>${i+1}. ${esc(s.query)}</b>`);markers.push(m);pts.push([s.lat,s.lon])});
- if(start){const m=L.circleMarker([start.lat,start.lon],{radius:8,color:"#fff",weight:2,fillColor:"#30b454",fillOpacity:1}).addTo(map).bindPopup("Start: mein Standort");markers.push(m);pts.push([start.lat,start.lon])}
- if(pts.length)map.fitBounds(L.latLngBounds(pts).pad(.18));else map.setView([53.5511,9.9937],11);
-}
-async function coordsForRoute(){const pts=[];if($("useStart").checked&&start)pts.push(start);stops.forEach(s=>pts.push({lat:s.lat,lon:s.lon}));return pts}
-async function calculateRoute(){
- try{
- const pts=await coordsForRoute();if(pts.length<2)return;
- const coord=pts.map(p=>`${p.lon},${p.lat}`).join(";");
- const r=await fetch(`https://router.project-osrm.org/route/v1/driving/${coord}?overview=full&geometries=geojson`);
- if(!r.ok)throw Error();const d=await r.json();if(d.code!=="Ok")throw Error();
- const route=d.routes[0];routeLayer=L.geoJSON(route.geometry,{style:{color:"#087cff",weight:5,opacity:.8}}).addTo(map);
- $("distance").textContent=(route.distance/1000).toFixed(1)+" km";$("duration").textContent=Math.round(route.duration/60)+" min";
- }catch(e){/* map pins remain useful if routing service is unavailable */}
-}
-$("locate").onclick=()=>{
- if(!navigator.geolocation){msg("Standort wird von diesem Browser nicht unterstützt.");return}
- msg("Standort wird ermittelt …");
- navigator.geolocation.getCurrentPosition(p=>{start={lat:p.coords.latitude,lon:p.coords.longitude};drawMap();if(stops.length)calculateRoute();msg("Standort als Startpunkt gesetzt.");},()=>msg("Standortzugriff nicht möglich. Bitte in iOS erlauben."),{enableHighAccuracy:true,timeout:12000});
-};
-$("useStart").onchange=()=>{if(stops.length)render()};
-$("optimize").onclick=async()=>{
- if(stops.length<3){msg("Zum Optimieren bitte mindestens drei Ziele eingeben.");return}
- $("optimize").disabled=true;msg("Berechne eine möglichst kurze Reihenfolge …");
- try{
-  const pts=await coordsForRoute();const coord=pts.map(p=>`${p.lon},${p.lat}`).join(";");
-  const r=await fetch(`https://router.project-osrm.org/table/v1/driving/${coord}?annotations=duration`);
-  if(!r.ok)throw Error();const d=await r.json();if(d.code!=="Ok")throw Error();
-  const offset=pts.length-stops.length, matrix=d.durations;
-  let remaining=stops.map((_,i)=>i+offset), order=[], current=0;
-  if(offset===0){current=remaining.shift();order.push(current)}
-  while(remaining.length){let best=remaining[0],bestCost=Infinity;for(const j of remaining){const c=matrix[current][j];if(c!==null&&c<bestCost){best=j;bestCost=c}}order.push(best);remaining=remaining.filter(x=>x!==best);current=best}
-  // If current location is start, order contains only stop indices.
-  if(offset===1)order=order.map(x=>x-offset);
-  stops=order.map(i=>stops[i]);save();render();msg("Reihenfolge nach geschätzter Fahrzeit optimiert.");
- }catch(e){msg("Optimierung gerade nicht verfügbar. Bitte später erneut versuchen.")}finally{$("optimize").disabled=false}
-};
-function mapsUrl(list){
- if(!list.length)return "";
- let url="https://maps.apple.com/?dirflg=d&daddr="+encodeURIComponent(list[0].query);
- if(start&&$("useStart").checked)url+="&saddr="+encodeURIComponent(`${start.lat},${start.lon}`);
- return url;
-}
-$("allMaps").onclick=()=>{if(stops.length)location.href=mapsUrl(stops)};
-$("next").onclick=()=>{if(stops.length){const s=stops[0];location.href="https://maps.apple.com/?daddr="+encodeURIComponent(s.query)+"&dirflg=d"}};
-$("clear").onclick=()=>{if(confirm("Alle gespeicherten Ziele löschen?")){stops=[];save();render();msg("Alle Ziele gelöscht.")}};
-if("serviceWorker" in navigator && location.protocol.startsWith("http"))navigator.serviceWorker.register("sw.js").catch(()=>{});
-render();
+(() => {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const KEY = "hamburg-route-stops-v2";
+  const MAX_STOPS = 20;
+  const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
+  const OSRM_URL = "https://router.project-osrm.org";
+  const DEFAULT_CENTER = [53.5511, 9.9937];
+
+  let stops = loadStops();
+  let start = null;
+  let markers = [];
+  let routeLayer = null;
+  let map;
+  let routeSequence = 0;
+  let routeTimer = null;
+  let lastGeocodeAt = 0;
+  const geocodeCache = new Map();
+
+  function loadStops() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(KEY) || "[]");
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter(s => s && Number.isFinite(+s.lat) && Number.isFinite(+s.lon) && typeof s.query === "string")
+        .slice(0, MAX_STOPS)
+        .map(s => ({ query: s.query, label: String(s.label || s.query), lat: +s.lat, lon: +s.lon }));
+    } catch {
+      return [];
+    }
+  }
+
+  function save() {
+    try { localStorage.setItem(KEY, JSON.stringify(stops)); }
+    catch { message("Speichern nicht möglich. Prüfe den freien Speicherplatz deines Browsers.", true); }
+  }
+
+  function message(text, error = false) {
+    $("status").textContent = text;
+    $("status").style.color = error ? "#c92b25" : "";
+  }
+
+  function escapeHTML(value) {
+    return String(value).replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+
+  function wait(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function geocode(query) {
+    const cacheKey = query.trim().toLocaleLowerCase("de");
+    if (geocodeCache.has(cacheKey)) return geocodeCache.get(cacheKey);
+
+    // Nominatim verlangt maximal eine Anfrage pro Sekunde.
+    const waitMs = Math.max(0, 1100 - (Date.now() - lastGeocodeAt));
+    if (waitMs) await wait(waitMs);
+
+    const url = new URL(NOMINATIM_URL);
+    url.search = new URLSearchParams({
+      format: "jsonv2",
+      limit: "1",
+      countrycodes: "de",
+      q: query
+    }).toString();
+
+    const response = await fetch(url, {
+      headers: { "Accept-Language": "de" },
+      cache: "no-store"
+    });
+    lastGeocodeAt = Date.now();
+
+    if (response.status === 429) throw new Error("Die Adresssuche ist gerade ausgelastet. Bitte warte kurz und versuche es erneut.");
+    if (!response.ok) throw new Error("Adresssuche gerade nicht erreichbar.");
+    const results = await response.json();
+    if (!results.length) throw new Error("Adresse nicht gefunden. Bitte genauer eingeben.");
+
+    const result = {
+      lat: Number(results[0].lat),
+      lon: Number(results[0].lon),
+      label: results[0].display_name
+    };
+    geocodeCache.set(cacheKey, result);
+    return result;
+  }
+
+  async function addStop() {
+    const query = $("address").value.trim();
+    if (!query) return;
+    if (stops.length >= MAX_STOPS) {
+      message(`Maximal ${MAX_STOPS} Ziele möglich.`, true);
+      return;
+    }
+
+    $("add").disabled = true;
+    message("Suche Adresse …");
+    try {
+      const place = await geocode(query);
+      const duplicate = stops.some(s =>
+        Math.abs(s.lat - place.lat) < 0.00001 && Math.abs(s.lon - place.lon) < 0.00001
+      );
+      if (duplicate) {
+        message("Dieses Ziel ist bereits in deiner Liste.", true);
+        return;
+      }
+      stops.push({ query, lat: place.lat, lon: place.lon, label: place.label });
+      $("address").value = "";
+      save();
+      render();
+      message("Ziel hinzugefügt.");
+    } catch (error) {
+      message(error.message || "Adresssuche fehlgeschlagen.", true);
+    } finally {
+      $("add").disabled = false;
+    }
+  }
+
+  function moveStop(index, direction) {
+    const next = index + direction;
+    if (next < 0 || next >= stops.length) return;
+    [stops[index], stops[next]] = [stops[next], stops[index]];
+    save();
+    render();
+  }
+
+  function removeStop(index) {
+    stops.splice(index, 1);
+    save();
+    render();
+    message("Ziel entfernt.");
+  }
+
+  function renderList() {
+    $("count").textContent = `${stops.length}/${MAX_STOPS}`;
+    $("stops").innerHTML = stops.map((stop, index) => `
+      <li class="stop">
+        <span class="num">${index + 1}</span>
+        <div class="stoptext">
+          <div class="stopname">${escapeHTML(stop.query)}</div>
+          <div class="stopmeta">${escapeHTML(stop.label || "")}</div>
+        </div>
+        <div class="move">
+          <button type="button" data-up="${index}" ${index === 0 ? "disabled" : ""} aria-label="Ziel nach oben verschieben">↑</button>
+          <button type="button" data-down="${index}" ${index === stops.length - 1 ? "disabled" : ""} aria-label="Ziel nach unten verschieben">↓</button>
+        </div>
+        <button type="button" class="danger remove" data-del="${index}" aria-label="Ziel löschen">×</button>
+      </li>
+    `).join("");
+
+    $("stops").querySelectorAll("[data-up]").forEach(button => {
+      button.addEventListener("click", () => moveStop(Number(button.dataset.up), -1));
+    });
+    $("stops").querySelectorAll("[data-down]").forEach(button => {
+      button.addEventListener("click", () => moveStop(Number(button.dataset.down), 1));
+    });
+    $("stops").querySelectorAll("[data-del]").forEach(button => {
+      button.addEventListener("click", () => removeStop(Number(button.dataset.del)));
+    });
+
+    $("allMaps").disabled = stops.length === 0;
+    $("next").disabled = stops.length === 0;
+    $("optimize").disabled = stops.length < 3;
+  }
+
+  function drawMap() {
+    markers.forEach(marker => map.removeLayer(marker));
+    markers = [];
+    if (routeLayer) {
+      map.removeLayer(routeLayer);
+      routeLayer = null;
+    }
+
+    const points = [];
+    stops.forEach((stop, index) => {
+      const marker = L.marker([stop.lat, stop.lon], {
+        icon: L.divIcon({
+          className: "",
+          html: `<div class="route-marker">${index + 1}</div>`,
+          iconSize: [30, 30],
+          iconAnchor: [15, 15]
+        })
+      }).addTo(map).bindPopup(`<strong>${index + 1}. ${escapeHTML(stop.query)}</strong>`);
+      markers.push(marker);
+      points.push([stop.lat, stop.lon]);
+    });
+
+    if (start) {
+      const marker = L.circleMarker([start.lat, start.lon], {
+        radius: 8, color: "#fff", weight: 2, fillColor: "#22a06b", fillOpacity: 1
+      }).addTo(map).bindPopup("Start: Mein Standort");
+      markers.push(marker);
+      points.push([start.lat, start.lon]);
+    }
+
+    if (points.length > 1) map.fitBounds(L.latLngBounds(points).pad(0.18));
+    else if (points.length === 1) map.setView(points[0], 14);
+    else map.setView(DEFAULT_CENTER, 11);
+  }
+
+  function routePoints() {
+    const points = [];
+    if ($("useStart").checked && start) points.push(start);
+    stops.forEach(stop => points.push({ lat: stop.lat, lon: stop.lon }));
+    return points;
+  }
+
+  function scheduleRoute() {
+    clearTimeout(routeTimer);
+    const sequence = ++routeSequence;
+    if (routeLayer) {
+      map.removeLayer(routeLayer);
+      routeLayer = null;
+    }
+    $("distance").textContent = "–";
+    $("duration").textContent = "–";
+    if (routePoints().length < 2) return;
+
+    routeTimer = setTimeout(() => calculateRoute(sequence), 350);
+  }
+
+  async function calculateRoute(sequence = ++routeSequence) {
+    const points = routePoints();
+    if (points.length < 2) return;
+
+    const coordinates = points.map(point => `${point.lon},${point.lat}`).join(";");
+    const url = `${OSRM_URL}/route/v1/driving/${coordinates}?overview=full&geometries=geojson&steps=false`;
+
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Routenserver nicht erreichbar.");
+      const data = await response.json();
+      if (sequence !== routeSequence) return;
+      if (data.code !== "Ok" || !data.routes?.length) throw new Error("Keine passende Route gefunden.");
+
+      const route = data.routes[0];
+      routeLayer = L.geoJSON(route.geometry, {
+        style: { color: "#087cff", weight: 5, opacity: 0.82, lineCap: "round", lineJoin: "round" }
+      }).addTo(map);
+
+      $("distance").textContent = `${(route.distance / 1000).toFixed(1).replace(".", ",")} km`;
+      $("duration").textContent = `${Math.round(route.duration / 60)} min`;
+    } catch (error) {
+      if (sequence !== routeSequence) return;
+      $("distance").textContent = "–";
+      $("duration").textContent = "–";
+      message("Route gerade nicht verfügbar. Die Ziele bleiben gespeichert.", true);
+    }
+  }
+
+  async function optimizeOrder() {
+    if (stops.length < 3) return;
+    $("optimize").disabled = true;
+    message("Berechne eine kurze Reihenfolge …");
+
+    try {
+      const points = routePoints();
+      const coordinates = points.map(point => `${point.lon},${point.lat}`).join(";");
+      const url = `${OSRM_URL}/table/v1/driving/${coordinates}?annotations=duration`;
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Optimierungsdienst nicht erreichbar.");
+      const data = await response.json();
+      if (data.code !== "Ok" || !data.durations) throw new Error("Keine Fahrzeitmatrix erhalten.");
+
+      // Bei gesetztem Standort beginnt die Tour dort. Ohne Standort bleibt Ziel 1 der Start.
+      const hasStart = $("useStart").checked && Boolean(start);
+      const offset = hasStart ? 1 : 0;
+      let current = 0;
+      const remaining = stops.map((_, index) => index + offset);
+      const order = [];
+
+      if (!hasStart) {
+        order.push(0);
+        remaining.shift();
+        current = 0;
+      }
+
+      while (remaining.length) {
+        let bestPosition = 0;
+        let bestDuration = Infinity;
+        for (let i = 0; i < remaining.length; i++) {
+          const duration = data.durations[current]?.[remaining[i]];
+          if (duration !== null && Number.isFinite(duration) && duration < bestDuration) {
+            bestDuration = duration;
+            bestPosition = i;
+          }
+        }
+        const [nextIndex] = remaining.splice(bestPosition, 1);
+        order.push(nextIndex - offset);
+        current = nextIndex;
+      }
+
+      if (order.length !== stops.length || new Set(order).size !== stops.length) {
+        throw new Error("Die Reihenfolge konnte nicht vollständig bestimmt werden.");
+      }
+
+      stops = order.map(index => stops[index]);
+      save();
+      render();
+      message("Reihenfolge nach geschätzter Fahrzeit optimiert. Du kannst sie jederzeit manuell ändern.");
+    } catch (error) {
+      message("Optimierung gerade nicht verfügbar. Bitte später erneut versuchen.", true);
+    } finally {
+      $("optimize").disabled = stops.length < 3;
+    }
+  }
+
+  function appleMapsURL(stop, includeStart) {
+    let url = `https://maps.apple.com/?daddr=${encodeURIComponent(`${stop.lat},${stop.lon}`)}&dirflg=d`;
+    if (includeStart && start && $("useStart").checked) {
+      url += `&saddr=${encodeURIComponent(`${start.lat},${start.lon}`)}`;
+    }
+    return url;
+  }
+
+  function openNextStop() {
+    if (!stops.length) return;
+    window.location.href = appleMapsURL(stops[0], true);
+  }
+
+  function openFirstStop() {
+    if (!stops.length) return;
+    window.location.href = appleMapsURL(stops[0], false);
+  }
+
+  function locateUser() {
+    if (!navigator.geolocation) {
+      message("Standort wird von diesem Browser nicht unterstützt.", true);
+      return;
+    }
+    $("locate").disabled = true;
+    message("Standort wird ermittelt …");
+    navigator.geolocation.getCurrentPosition(position => {
+      start = { lat: position.coords.latitude, lon: position.coords.longitude };
+      drawMap();
+      scheduleRoute();
+      $("locate").disabled = false;
+      message("Standort als Startpunkt gesetzt.");
+    }, () => {
+      $("locate").disabled = false;
+      message("Standortzugriff nicht möglich. Bitte in iOS erlauben.", true);
+    }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 });
+  }
+
+  function render() {
+    renderList();
+    drawMap();
+    scheduleRoute();
+  }
+
+  $("add").addEventListener("click", addStop);
+  $("address").addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addStop();
+    }
+  });
+  $("locate").addEventListener("click", locateUser);
+  $("useStart").addEventListener("change", () => {
+    drawMap();
+    scheduleRoute();
+  });
+  $("optimize").addEventListener("click", optimizeOrder);
+  $("allMaps").addEventListener("click", openFirstStop);
+  $("next").addEventListener("click", openNextStop);
+  $("clear").addEventListener("click", () => {
+    if (!confirm("Alle gespeicherten Ziele löschen?")) return;
+    stops = [];
+    save();
+    render();
+    message("Alle Ziele gelöscht.");
+  });
+
+  map = L.map("map", { zoomControl: true }).setView(DEFAULT_CENTER, 11);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+  }).addTo(map);
+
+  if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});
+  }
+
+  render();
+})();
